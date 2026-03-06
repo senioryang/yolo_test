@@ -9,20 +9,25 @@ from sqlalchemy import create_engine, text
 
 # Patch paramiko for compat with new versions removing top-level keys
 import paramiko
-if not hasattr(paramiko, "DSSKey"):
-    try:
+try:
+    if not hasattr(paramiko, "DSSKey"):
         from paramiko.dsskey import DSSKey
         paramiko.DSSKey = DSSKey
-    except ImportError:
-        pass
-if not hasattr(paramiko, "RSAKey"):
-    try:
+    if not hasattr(paramiko, "RSAKey"):
         from paramiko.rsakey import RSAKey
         paramiko.RSAKey = RSAKey
+except ImportError:
+    print("Warning: could not patch paramiko keys")
+    # try older path just in case
+    try:
+        from paramiko.keys import DSSKey
+        paramiko.DSSKey = DSSKey
     except ImportError:
         pass
 
 import sshtunnel  # Add this import for SSH tunneling
+import traceback # For detailed error info
+
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -63,7 +68,8 @@ def download_image(url, save_path):
             f.write(response.content)
             
     except Exception as e:
-        print(f"Failed to download {url}: {e}")
+         print(f"Failed to establish SSH tunnel or connect to DB: {e}")
+         traceback.print_exc()
 
 def fetch_data_by_book_id(book_id, output_base_dir):
     """
@@ -292,7 +298,7 @@ def fetch_data_by_book_id(book_id, output_base_dir):
                 print("--- Data Fetch Complete ---")
     except Exception as e:
          print(f"Failed to establish SSH tunnel or connect to DB: {e}")
-
+         traceback.print_exc()
 
 if __name__ == "__main__":
     # Configuration
