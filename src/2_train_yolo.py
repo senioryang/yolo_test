@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import torch
 import yaml
+from dotenv import load_dotenv
 
 def update_yaml_path(yaml_path, dataset_root):
     # Update the 'path' in data.yaml to the absolute path on the current machine
@@ -18,17 +19,38 @@ def update_yaml_path(yaml_path, dataset_root):
     print(f"Updated data.yaml 'path' to: {data['path']}")
 
 def train():
-    # Base paths relative to script
-    BASE_DIR = Path(__file__).resolve().parent.parent
+    # Base paths logic
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    load_dotenv(PROJECT_ROOT / ".env")
+    
+    solo_base = os.getenv("SOLO_BASE_PATH")
+    if solo_base:
+        if isinstance(solo_base, str):
+            solo_base = Path(solo_base)
+        print(f"Using configured SOLO_BASE_PATH: {solo_base}")
+        BASE_DIR = solo_base
+    else:
+        BASE_DIR = PROJECT_ROOT
+        
     DATASET_DIR = BASE_DIR / "dataset"
+    # IMPORTANT: The data.yaml MUST be inside the dataset folder as per YOLO conventions
+    # But generate_labels.py writes it there
     DATA_YAML_PATH = DATASET_DIR / "data.yaml"
+    
+    # Update YAML content (path field) to ensure absolute path correct
+    if DATA_YAML_PATH.exists():
+        with open(DATA_YAML_PATH, 'r') as f:
+            y = yaml.safe_load(f)
+        y['path'] = str(DATASET_DIR.absolute().as_posix())
+        with open(DATA_YAML_PATH, 'w') as f:
+            yaml.dump(y, f, sort_keys=False)
+    
     PROJECT_DIR = BASE_DIR / "runs/detect"
     
     # 1. Update YAML with current absolute paths (Critical for cross-platform)
     if not DATA_YAML_PATH.exists():
         print(f"Error: {DATA_YAML_PATH} not found. Run generate_labels.py first.")
         return
-    update_yaml_path(DATA_YAML_PATH, DATASET_DIR)
 
     # 2. Detect Environment (Windows CPU vs Linux GPU)
     # Using torch to check CUDA availability

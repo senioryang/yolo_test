@@ -1,11 +1,14 @@
+
 import cv2
 import os
 import shutil
 import re
+import csv
 import numpy as np
 from pathlib import Path
 import random
 from collections import defaultdict
+from dotenv import load_dotenv
 
 def cv2_imread_unicode(path):
     """
@@ -43,7 +46,7 @@ def find_crop_location(page_img, crop_img):
         
     # Check if crop is larger than page (extracted data error)
     if crop_gray.shape[0] > page_gray.shape[0] or crop_gray.shape[1] > page_gray.shape[1]:
-        return None
+        return None, 0.0
 
     res = cv2.matchTemplate(page_gray, crop_gray, cv2.TM_CCOEFF_NORMED)
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
@@ -52,8 +55,8 @@ def find_crop_location(page_img, crop_img):
     # High threshold reduces false positives which is crucial when searching multiple pages
     threshold = 0.85 
     if max_val >= threshold:
-        return max_loc # Top-left corner (x, y)
-    return None
+        return max_loc, max_val # Top-left corner (x, y), score
+    return None, max_val
 
 def process_dataset(source_pages_dir, source_crops_dir, output_dir, split_ratio=0.8, lookahead=2):
     """
@@ -70,6 +73,10 @@ def process_dataset(source_pages_dir, source_crops_dir, output_dir, split_ratio=
     train_lbl_dir = base_output / "labels/train"
     val_lbl_dir = base_output / "labels/val"
     
+    # Create directories if they don't exist
+    for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+    
     # Get all page images sorted naturally (to ensure page_1, page_2 sequence is correct)
     # Recursively search for common image formats
     extensions = ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tiff"]
@@ -82,6 +89,14 @@ def process_dataset(source_pages_dir, source_crops_dir, output_dir, split_ratio=
     page_map = {p.stem: i for i, p in enumerate(page_files)} # Map filename_no_ext -> index
     
     print(f"Found {len(page_files)} source pages.")
+
+    # Initialize CSV Log for Confidence Scores
+    match_log_path = base_output.parent / "runs" / "matching_details.csv"
+    match_log_path.parent.mkdir(parents=True, exist_ok=True)
+    match_log_file = open(match_log_path, 'w', newline='', encoding='utf-8')
+    csv_writer = csv.writer(match_log_file)
+    csv_writer.writerow(["page_name", "crop_name", "confidence_score", "label_string"])
+    print(f"Logging matching details to: {match_log_path}")
     
     # Dictionary to store matches: page_filepath -> list of label strings
     page_labels = defaultdict(list)
@@ -165,7 +180,7 @@ def process_dataset(source_pages_dir, source_crops_dir, output_dir, split_ratio=
                 page_img = cv2_imread_unicode(target_page_path)
                 if page_img is None: continue
                 
-                loc = find_crop_location(page_img, crop_img)
+                loc, score = find_crop_location(page_img, crop_img)
                 
                 if loc:
                     # Found it!
@@ -177,6 +192,9 @@ def process_dataset(source_pages_dir, source_crops_dir, output_dir, split_ratio=
                     # Store result against the ACTUAL matched page, not the expected one
                     page_labels[target_page_path].append(label)
                     
+                    # Log confidence
+                    csv_writer.writerow([target_page_path.stem, crop_path.name, f"{score:.5f}", label])
+
                     # Calculate offset for logging
                     found_offset = target_idx - start_idx
                     if found_offset != 0:
@@ -190,6 +208,7 @@ def process_dataset(source_pages_dir, source_crops_dir, output_dir, split_ratio=
                  # Optional: print(f"    [Fail] Could not find '{crop_path.name}' in {expected_page_name} or next {lookahead} pages.")
                  pass
 
+    match_log_file.close() # Close CSV
     print(f"Matching complete. Found {total_crops_matched}/{total_crops_processed} crops.")
     print(f"Writing dataset...")
 
@@ -214,11 +233,35 @@ def process_dataset(source_pages_dir, source_crops_dir, output_dir, split_ratio=
             else:
                 pass # Create empty file
 
+    # Generate data.yaml for YOLO training
+    print("Generating data.yaml...")
+    data_yaml_content = f"""path: {base_output.absolute().as_posix()}
+train: images/train
+val: images/val
+
+names:
+  0: question_block
+"""
+    with open(base_output / "data.yaml", "w", encoding='utf-8') as f:
+        f.write(data_yaml_content)
+    print(f"Created data.yaml at {base_output / 'data.yaml'}")
+
     print("Dataset generation finished.")
 
 if __name__ == "__main__":
     # Configure paths relative to this script
-    BASE_DIR = Path(__file__).resolve().parent.parent
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    load_dotenv(PROJECT_ROOT / ".env")
+    
+    solo_base = os.getenv("SOLO_BASE_PATH")
+    if solo_base:
+        # User defined base path
+        print(f"Using configured SOLO_BASE_PATH: {solo_base}")
+        BASE_DIR = Path(solo_base)
+    else:
+        # Default project path
+        BASE_DIR = PROJECT_ROOT
+
     SOURCE_PAGES = BASE_DIR / "data/source_pages"
     SOURCE_CROPS = BASE_DIR / "data/source_crops"
     OUTPUT_DIR = BASE_DIR / "dataset"
@@ -230,3 +273,13 @@ if __name__ == "__main__":
     print(f"Processing data in: {BASE_DIR}")
     # Increased lookahead to 2 (searches Current, Next, Next+1)
     process_dataset(SOURCE_PAGES, SOURCE_CROPS, OUTPUT_DIR, lookahead=2)
+
+    # Automatically generate stats report
+    print("\n[Auto] Generating statistics report...")
+    try:
+        from generate_stats import generate_stats_report
+        generate_stats_report()
+    except ImportError:
+        print("Error: Could not import generate_stats_report. Make sure generate_stats.py exists.")
+    except Exception as e:
+        print(f"Error generating stats: {e}")

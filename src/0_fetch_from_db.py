@@ -28,16 +28,24 @@ except (ImportError, AttributeError) as e:
 
 import sshtunnel  # Add this import for SSH tunneling
 import traceback # For detailed error info
-
-
 from dotenv import load_dotenv
-load_dotenv()
 
+# Determine Project Root at module level for robust path resolution
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 # SSH and Database credentials
 SSH_HOST = "101.200.164.23"
 SSH_USER = "ecs-user"
-SSH_PEM = os.getenv("PEM_FILE_PATH", "ecs-user-luti.pem")
+
+# Resolve PEM path: If relative, assume it's in PROJECT_ROOT
+_pem_env = os.getenv("PEM_FILE_PATH", "ecs-user-luti.pem")
+if not os.path.isabs(_pem_env):
+    SSH_PEM = str(PROJECT_ROOT / _pem_env)
+else:
+    SSH_PEM = _pem_env
+
+print(f"PEM File resolved to: {SSH_PEM}")
 
 IS_LOCAL = os.getenv("IS_LOCAL", "0") == "1"
 
@@ -71,6 +79,28 @@ def download_image(url, save_path):
     except Exception as e:
          print(f"Failed to establish SSH tunnel or connect to DB: {e}")
          traceback.print_exc()
+
+def save_book_metadata(metadata, output_base_dir):
+    """
+    Saves or updates book metadata to a JSON file.
+    Structure: { book_id: { 'subject': ..., 'degree': ... } }
+    """
+    meta_path = Path(output_base_dir) / "book_metadata.json"
+    existing_data = {}
+    
+    if meta_path.exists():
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                existing_data = json.load(f)
+        except json.JSONDecodeError:
+            pass
+            
+    # Update with new data
+    existing_data.update(metadata)
+    
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(existing_data, f, ensure_ascii=False, indent=2)
+    print(f"Updated metadata for {len(metadata)} books in {meta_path.name}")
 
 def fetch_data_by_book_id(book_id, output_base_dir):
     """
@@ -108,28 +138,44 @@ def fetch_data_by_book_id(book_id, output_base_dir):
 
             try:
                 with conn.cursor() as cursor:
-                    # [Pre-Step] Fetch book subject name for naming
-                    sql_subject = f"""
-                        SELECT bs.subject_name 
+                    # [Pre-Step] Fetch book subject name and degree name
+                    sql_info = f"""
+                        SELECT 
+                            bs.subject_name,
+                            bd.degree_name
                         FROM books b
                         LEFT JOIN book_subjects bs ON b.subject_id = bs.subject_id
+                        LEFT JOIN book_degrees bd ON b.degree_id = bd.degree_id
                         WHERE b.book_id = '{book_id}'
                         LIMIT 1
                     """
-                    cursor.execute(sql_subject)
-                    subject_row = cursor.fetchone()
-                    book_subject_name = 'Unknown'
-                    if subject_row:
-                        if isinstance(subject_row, (tuple, list)):
-                            book_subject_name = subject_row[0]
-                        elif isinstance(subject_row, dict):
-                            book_subject_name = subject_row.get('subject_name')
-                    if not book_subject_name: book_subject_name = 'Unknown'
+                    cursor.execute(sql_info)
+                    info_row = cursor.fetchone()
                     
+                    book_subject_name = 'UnknownSubject'
+                    book_degree_name = 'UnknownDegree'
+
+                    if info_row:
+                        if isinstance(info_row, (tuple, list)):
+                            if info_row[0]: book_subject_name = info_row[0]
+                            if len(info_row) > 1 and info_row[1]: book_degree_name = info_row[1]
+                        elif isinstance(info_row, dict):
+                            book_subject_name = info_row.get('subject_name') or 'UnknownSubject'
+                            book_degree_name = info_row.get('degree_name') or 'UnknownDegree'
+                    
+                    # Save Metadata for later stats analysis
+                    save_book_metadata({
+                        str(book_id): {
+                            'subject': book_subject_name,
+                            'degree': book_degree_name
+                        }
+                    }, output_base_dir)
+
                     # ---------------------------------------------------------
                     # Step 1: Query PDF Page Images
                     # Query the full page images for this book (the inputs for YOLO)
                     # ---------------------------------------------------------
+                    print(f"Info: Subject={book_subject_name}, Degree={book_degree_name}")
                     print("Querying pages and creating directories...")
                     sql_pages = f"SELECT page_number, page_image_url FROM book_pages WHERE book_id = '{book_id}' ORDER BY page_number ASC"
                     cursor.execute(sql_pages)
@@ -148,9 +194,9 @@ def fetch_data_by_book_id(book_id, output_base_dir):
                         
                         if not p_url: continue
                         
-                        # Naming Convention: book_{book_id}_{subject_name}_page_{page_num}
-                        # Use zero-padding for correct sorting (0001, 0002...)
-                        base_name = f"book_{book_id}_{book_subject_name}_page_{p_num:04d}"
+                        # UPDATE: Removed subject_name from filename
+                        # New Naming: book_{book_id}_page_{p_num:04d}
+                        base_name = f"book_{book_id}_page_{p_num:04d}"
                         
                         # 1. Download Page Image
                         # Determine extension
@@ -221,7 +267,7 @@ def fetch_data_by_book_id(book_id, output_base_dir):
                         # Note: Dictionary access depends on cursor implementation. 
                         
                         # Use the pre-fetched subject name for all questions in this book
-                        subject_name = book_subject_name
+                        # subject_name = book_subject_name
                         
                         # Helper to get value whether dict or object or tuple (if we knew indices)
                         # But here we assume dict access as common in python db scripts
@@ -239,12 +285,9 @@ def fetch_data_by_book_id(book_id, output_base_dir):
                            q_text = q.get('reviewed_question')
                            o_text = q.get('reviewed_option')
                         
-                        if not subject_name: subject_name = 'Unknown'
-                        
                         # --- Create Directory Structure ---
-                        # Requested format: book_{book_id}_{subject_name}_page_{start_page_num}
-                        # Must match page filename logic with zero padding
-                        folder_name = f"book_{book_id}_{subject_name}_page_{start_p:04d}"
+                        # Use updated naming convention without subject
+                        folder_name = f"book_{book_id}_page_{start_p:04d}"
                         save_folder = source_crops_dir / folder_name
                         save_folder.mkdir(parents=True, exist_ok=True)
                         
@@ -301,11 +344,103 @@ def fetch_data_by_book_id(book_id, output_base_dir):
          print(f"Failed to establish SSH tunnel or connect to DB: {e}")
          traceback.print_exc()
 
+def get_all_book_ids():
+    """
+    Connects to DB and retrieves all available book IDs.
+    """
+    print("--- Fetching All Book IDs ---")
+    ids = []
+    # Use a Try/Finally block to ensure resources are cleaned up
+    try:
+        # Establish SSH Tunnel - similar to fetch_data_by_book_id
+        # We use '0.0.0.0' or '127.0.0.1' for local binding.
+        # Note: If running concurrent tunnels, ensure unique ports or reuse tunnel.
+        tunnel = sshtunnel.SSHTunnelForwarder(
+            (SSH_HOST, 22),
+            ssh_username=SSH_USER,
+            ssh_pkey=SSH_PEM,
+            remote_bind_address=(REMOTE_MYSQL_HOST, 3306),
+            local_bind_address=('127.0.0.1', 0)  # Use dynamic port (0) to avoid conflict
+        )
+        tunnel.start()
+        
+        try:
+            print(f"SSH Tunnel established for ID fetch. Local port: {tunnel.local_bind_port}")
+            db_uri = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@127.0.0.1:{tunnel.local_bind_port}/{MYSQL_DB}"
+            engine = create_engine(db_uri)
+            conn = engine.raw_connection()
+            
+            if conn:
+                with conn.cursor() as cursor:
+                    # Select ONLY book_ids
+                    cursor.execute("SELECT book_id FROM books")
+                    rows = cursor.fetchall()
+                    for r in rows:
+                        # Handle tuple vs dict depending on cursor
+                        if isinstance(r, (list, tuple)):
+                            ids.append(str(r[0]))
+                        elif isinstance(r, dict):
+                            ids.append(str(r.get('book_id')))
+                    print(f"Successfully retrieved {len(ids)} book IDs.")
+                conn.close()
+        finally:
+            tunnel.stop()
+            
+    except Exception as e:
+        print(f"Error fetching book IDs: {e}")
+        # traceback.print_exc()
+    
+    return ids
+
 if __name__ == "__main__":
     # Configuration
-    BOOK_ID = "8785"
+    # Output path logic with SOLO_BASE_PATH support
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
     
-    # Output path: c:/ysc/github/yolo_test/data
-    BASE_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+    # Reload .env from project root to be safe
+    load_dotenv(PROJECT_ROOT / ".env")
     
-    fetch_data_by_book_id(BOOK_ID, BASE_DATA_DIR)
+    solo_base = os.getenv("SOLO_BASE_PATH")
+    if solo_base:
+        # User defined base path
+        print(f"Using configured SOLO_BASE_PATH: {solo_base}")
+        BASE_DATA_DIR = Path(solo_base) / "data"
+    else:
+        # Default project path
+        BASE_DATA_DIR = PROJECT_ROOT / "data"
+    
+    print(f"Data directory set to: {BASE_DATA_DIR}")
+    
+    # Mode selection: specific book or all books
+    # 1. Check for command line arguments
+    book_ids_to_process = []
+    if len(sys.argv) > 1:
+        # User provided ID(s)
+        book_ids_to_process = sys.argv[1:]
+    else:
+        # 2. Check for book_ids.txt in project root
+        book_ids_file = PROJECT_ROOT / "book_ids.txt"
+        if book_ids_file.exists():
+            print(f"Loading book IDs from {book_ids_file}")
+            try:
+                with open(book_ids_file, "r", encoding="utf-8") as f:
+                     content = f.read().strip()
+                     if content:
+                        # Split by newlines and filter empty lines
+                        book_ids_to_process = [line.strip() for line in content.splitlines() if line.strip()]
+                        print(f"Found {len(book_ids_to_process)} valid book IDs in file.")
+                     else:
+                        print("book_ids.txt is empty.")
+            except Exception as e:
+                print(f"Error reading book_ids.txt: {e}")
+        else:
+            print("book_ids.txt not found.")
+
+    if not book_ids_to_process:
+        print("No book IDs provided via arguments or book_ids.txt. Exiting.")
+        sys.exit(0)
+        
+    print(f"Plan to process {len(book_ids_to_process)} books: {book_ids_to_process}")
+    
+    for b_id in book_ids_to_process:
+        fetch_data_by_book_id(b_id, BASE_DATA_DIR)

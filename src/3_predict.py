@@ -3,6 +3,7 @@ import cv2
 import os
 import numpy as np
 from pathlib import Path
+from dotenv import load_dotenv
 
 def predict(image_path, model_path):
     # Load the trained model
@@ -65,12 +66,36 @@ def predict(image_path, model_path):
 
 if __name__ == '__main__':
     # Determine base directory
-    BASE_DIR = Path(__file__).resolve().parent.parent
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    load_dotenv(PROJECT_ROOT / ".env")
+    
+    solo_base = os.getenv("SOLO_BASE_PATH")
+    if solo_base:
+        if isinstance(solo_base, str):
+            solo_base = Path(solo_base)
+        print(f"Using configured SOLO_BASE_PATH: {solo_base}")
+        BASE_DIR = solo_base
+    else:
+        BASE_DIR = PROJECT_ROOT
     
     # Configure paths relative to project root
-    TEST_IMAGE = BASE_DIR / "data/source_pages/book_8785_数学_page_0053.jpeg"
+    # Note: Because the data folder structure changed, verify this path exists
+    # Example: BASE_DIR / "data/source_pages/book_8785_page_0001.jpeg"
+    TEST_IMAGE_DIR = BASE_DIR / "data/source_pages"
+    
+    # Find a test image dynamically
+    if TEST_IMAGE_DIR.exists():
+        potential_images = list(TEST_IMAGE_DIR.glob("*.jpeg")) + list(TEST_IMAGE_DIR.glob("*.jpg"))
+        if potential_images:
+            TEST_IMAGE = potential_images[0]
+        else:
+             TEST_IMAGE = BASE_DIR / "data/test_image.jpg" # Fallback
+    else:
+        TEST_IMAGE = BASE_DIR / "data/test_image.jpg"
+        
     MODEL_PATH = BASE_DIR / "runs/detect/train_run/weights/best.pt"
     
+    print(f"Using Test Image: {TEST_IMAGE}")
     print(f"Looking for model at: {MODEL_PATH}")
     
     if TEST_IMAGE.exists() and MODEL_PATH.exists():
