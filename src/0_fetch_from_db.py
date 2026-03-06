@@ -6,6 +6,22 @@ from pathlib import Path
 # import pymysql # Example: pip install pymysql
 import requests # Used for downloading images
 from sqlalchemy import create_engine, text
+
+# Patch paramiko for compat with new versions removing top-level keys
+import paramiko
+if not hasattr(paramiko, "DSSKey"):
+    try:
+        from paramiko.dsskey import DSSKey
+        paramiko.DSSKey = DSSKey
+    except ImportError:
+        pass
+if not hasattr(paramiko, "RSAKey"):
+    try:
+        from paramiko.rsakey import RSAKey
+        paramiko.RSAKey = RSAKey
+    except ImportError:
+        pass
+
 import sshtunnel  # Add this import for SSH tunneling
 
 from dotenv import load_dotenv
