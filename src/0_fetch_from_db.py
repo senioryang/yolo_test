@@ -16,14 +16,15 @@ try:
     if not hasattr(paramiko, "RSAKey"):
         from paramiko.rsakey import RSAKey
         paramiko.RSAKey = RSAKey
-except ImportError:
-    print("Warning: could not patch paramiko keys")
-    # try older path just in case
-    try:
-        from paramiko.keys import DSSKey
+except (ImportError, AttributeError) as e:
+    print(f"Warning: could not import paramiko keys directly: {e}")
+    # Fallback for sshtunnel which requires these attributes to exist
+    if not hasattr(paramiko, "DSSKey"):
+        class DSSKey: pass
         paramiko.DSSKey = DSSKey
-    except ImportError:
-        pass
+    if not hasattr(paramiko, "RSAKey"):
+        class RSAKey: pass
+        paramiko.RSAKey = RSAKey
 
 import sshtunnel  # Add this import for SSH tunneling
 import traceback # For detailed error info
